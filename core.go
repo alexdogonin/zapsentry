@@ -19,18 +19,20 @@ func NewWrapper(client *sentry.Client, options ...Option) func(zapcore.Core) zap
 type SentryCore struct {
 	zapcore.Core
 
-	client           *sentry.Client
-	secretHeaders    map[string]struct{}
-	requestFieldName string
-	bodyCtxName      *string
+	client            *sentry.Client
+	secretHeaders     map[string]struct{}
+	requestFieldName  string
+	bodyCtxName       *string
+	minSentrySeverity zapcore.Level
 
 	fields []zapcore.Field
 }
 
 func NewSentryCore(core zapcore.Core, client *sentry.Client, options ...Option) *SentryCore {
 	c := &SentryCore{
-		Core:   core,
-		client: client,
+		Core:              core,
+		client:            client,
+		minSentrySeverity: zapcore.DebugLevel,
 	}
 
 	for _, opt := range options {
@@ -41,8 +43,6 @@ func NewSentryCore(core zapcore.Core, client *sentry.Client, options ...Option) 
 }
 
 func (c *SentryCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
-	event := sentry.NewEvent()
-
 	fields = append(
 		append(
 			make([]zapcore.Field, 0, len(c.fields)+len(fields)),
@@ -76,26 +76,32 @@ func (c *SentryCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 		}
 	}
 
+	var req *http.Request
 	if reqVal != nil {
-		req, ok := reqVal.(*http.Request)
+		var ok bool
+		req, ok = reqVal.(*http.Request)
 		if !ok {
 			return fmt.Errorf("wrong type of request %v", reqVal)
 		}
 
-		event.Request = createSentryRequest(req, c.secretHeaders, c.bodyCtxName)
-
-		fields = append(fields, zap.Any(c.requestFieldName, event.Request))
+		fields = append(fields, zap.Any(c.requestFieldName, req))
 	}
 
-	event.Extra = enc.Fields
-	event.Extra["stacktrace"] = ent.Stack
+	if ent.Level >= c.minSentrySeverity {
+		event := sentry.NewEvent()
+		if req != nil {
+			event.Request = createSentryRequest(req, c.secretHeaders, c.bodyCtxName)
+		}
+		event.Extra = enc.Fields
+		event.Extra["stacktrace"] = ent.Stack
 
-	event.Message = ent.Message
-	event.Timestamp = ent.Time
-	event.Level = sentrySeverity(ent.Level)
+		event.Message = ent.Message
+		event.Timestamp = ent.Time
+		event.Level = sentrySeverity(ent.Level)
 
-	if eventID := c.client.CaptureEvent(event, nil, sentry.CurrentHub().Scope()); eventID == nil {
-		fields = append(fields, zap.String("sentry_error", "send event to sentry error"))
+		if eventID := c.client.CaptureEvent(event, nil, sentry.CurrentHub().Scope()); eventID == nil {
+			fields = append(fields, zap.String("sentry_error", "send event to sentry error"))
+		}
 	}
 
 	if err := c.Core.Write(ent, fields); err != nil {
